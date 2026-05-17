@@ -1,0 +1,573 @@
+<?php
+/*
+Plugin Name: Banknote Order Form
+Description: فرم سفارش خرید و فروش اسکناس با تایید دو مرحله‌ای و مدیریت وضعیت در پیشخوان
+Version: 1.0
+Author: Custom
+*/
+
+if (!defined('ABSPATH')) exit;
+
+/*---------------------------------------------------
+ثبت جدول دیتابیس (هنگام فعال‌سازی افزونه)
+---------------------------------------------------*/
+function bof_create_table() {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'banknote_orders';
+    $charset_collate = $wpdb->get_charset_collate();
+
+    $sql = "CREATE TABLE $table_name (
+        id mediumint(9) NOT NULL AUTO_INCREMENT,
+        fullname text NOT NULL,
+        phone text NOT NULL,
+        order_type text NOT NULL,
+        currency_type text NOT NULL,
+        is_read tinyint(1) DEFAULT 0 NOT NULL,
+        created_at datetime DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        PRIMARY KEY  (id)
+    ) $charset_collate;";
+
+    require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+    dbDelta($sql);
+}
+
+register_activation_hook(__FILE__, 'bof_create_table');
+
+/*---------------------------------------------------
+ثبت سفارش Ajax
+---------------------------------------------------*/
+function bof_save_order() {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'banknote_orders';
+
+    $fullname      = isset($_POST['fullname']) ? sanitize_text_field($_POST['fullname']) : '';
+    $phone         = isset($_POST['phone']) ? sanitize_text_field($_POST['phone']) : '';
+    $order_type    = isset($_POST['order_type']) ? sanitize_text_field($_POST['order_type']) : '';
+    $currency_type = isset($_POST['currency_type']) ? sanitize_text_field($_POST['currency_type']) : '';
+
+    if(empty($fullname) || empty($phone) || empty($order_type) || empty($currency_type)){
+        wp_send_json_error('اطلاعات ناقص است');
+    }
+
+    $insert = $wpdb->insert(
+        $table_name,
+        array(
+            'fullname'      => $fullname,
+            'phone'         => $phone,
+            'order_type'    => $order_type,
+            'currency_type' => $currency_type,
+            'is_read'       => 0,
+            'created_at'    => current_time('mysql')
+        ),
+        array('%s','%s','%s','%s','%d','%s')
+    );
+
+    if($insert){
+        wp_send_json_success('ثبت شد');
+    }else{
+        wp_send_json_error('خطا در ذخیره داده‌ها در دیتابیس');
+    }
+}
+
+add_action('wp_ajax_bof_save_order', 'bof_save_order');
+add_action('wp_ajax_nopriv_bof_save_order', 'bof_save_order');
+
+/*---------------------------------------------------
+فرم سفارش (سمت کاربر)
+---------------------------------------------------*/
+function banknote_order_form_shortcode() {
+    ob_start();
+    ?>
+  <style>
+    .bof-wrapper{ max-width:700px; margin:40px auto; background:#fff; padding:30px; border-radius:12px; box-shadow:0 5px 20px rgba(0,0,0,0.1); border-top:6px solid #009ab4; direction:rtl; }
+    .bof-wrapper h2{ margin-bottom:25px; text-align:center; }
+    .bof-wrapper label{ display:block; margin-bottom:8px; font-weight:bold; }
+    .bof-wrapper input[type="text"], .bof-wrapper select{ width:100%; padding:12px; margin-bottom:20px; border:1px solid #ddd; border-radius:8px; font-size:15px; box-sizing:border-box;}
+    .bof-wrapper .radio-group { margin-bottom: 20px; }
+    .bof-wrapper .radio-group label { display: inline-block; margin-left: 15px; font-weight: normal; cursor: pointer; }
+    .bof-wrapper button{ background:#009ab4; color:#fff; border:none; padding:12px 25px; border-radius:8px; cursor:pointer; font-size:15px; }
+    .bof-wrapper button:hover{ background:#008299; }
+    #bof_confirmBox{ display:none; margin-top:25px; padding:20px; border-radius:10px; background:#f8f8f8; border:1px solid #ddd; }
+    .bof-success-message{ margin-top:20px; background:#e6f7fa; color:#009ab4; padding:15px; border-radius:8px; display:none; border: 1px solid #009ab4; }
+    </style>
+
+    <div class="bof-wrapper">
+        <h2>فرم درخواست اسکناس</h2>
+        <form id="banknoteOrderForm">
+            
+            <label>نوع درخواست</label>
+            <div class="radio-group">
+                <label><input type="radio" name="order_type" value="خرید اسکناس" required> خرید اسکناس</label>
+                <label><input type="radio" name="order_type" value="فروش اسکناس" required> فروش اسکناس</label>
+            </div>
+
+            <label>نام و نام خانوادگی/نام سازمان</label>
+            <input type="text" id="bof_fullname" required>
+            
+                  
+            <label>شماره تماس</label>
+            <input type="text" id="bof_phone" required>
+                
+            <label>نوع ارز (اسکناس)</label>
+            <input type="text" id="bof_currency" placeholder="مثلا: دلار، یورو، پوند..." required>
+
+            
+      
+            
+            <button type="button" onclick="showBanknoteConfirmBox()">ادامه و تایید نهایی</button>
+        </form>
+
+        <div id="bof_confirmBox">
+            <h3>تایید نهایی درخواست</h3>
+            <p><strong>نوع درخواست:</strong> <span id="bof_confirm_type"></span></p>
+            <p><strong>نوع ارز:</strong> <span id="bof_confirm_currency"></span></p>
+            <p><strong>نام:</strong> <span id="bof_confirm_name"></span></p>
+            <p><strong>شماره تماس:</strong> <span id="bof_confirm_phone"></span></p>
+            <button type="button" onclick="submitBanknoteOrder()">ثبت نهایی درخواست</button>
+        </div>
+
+        <div class="bof-success-message" id="bof_successMessage">
+        درخواست شما با موفقیت ثبت شد منتظر تماس کارشناسان ما باشید.
+        </div>
+    </div>
+
+    <script>
+    function showBanknoteConfirmBox(){
+        // بررسی انتخاب شدن رادیو باتن
+        let orderTypeElem = document.querySelector('input[name="order_type"]:checked');
+        if(!orderTypeElem) {
+            alert('لطفا نوع درخواست (خرید یا فروش) را انتخاب کنید.');
+            return;
+        }
+
+        let currency = document.getElementById('bof_currency').value;
+        let fullname = document.getElementById('bof_fullname').value;
+        let phone = document.getElementById('bof_phone').value;
+
+        if(!currency || !fullname || !phone){
+            alert('لطفا تمام فیلدها را پر کنید.');
+            return;
+        }
+
+        document.getElementById('bof_confirm_type').innerText = orderTypeElem.value;
+        document.getElementById('bof_confirm_currency').innerText = currency;
+        document.getElementById('bof_confirm_name').innerText = fullname;
+        document.getElementById('bof_confirm_phone').innerText = phone;
+        
+        document.getElementById('bof_confirmBox').style.display = 'block';
+    }
+
+    function submitBanknoteOrder(){
+        let formData = new FormData();
+        formData.append('action','bof_save_order');
+        formData.append('order_type', document.querySelector('input[name="order_type"]:checked').value);
+        formData.append('currency_type', document.getElementById('bof_currency').value);
+        formData.append('fullname', document.getElementById('bof_fullname').value);
+        formData.append('phone', document.getElementById('bof_phone').value);
+
+        fetch('<?php echo admin_url("admin-ajax.php"); ?>',{
+            method:'POST',
+            credentials:'same-origin',
+            body:formData
+        })
+        .then(res => res.json())
+        .then(data => {
+            if(data.success){
+                document.getElementById('bof_successMessage').style.display='block';
+                document.getElementById('banknoteOrderForm').reset();
+                document.getElementById('bof_confirmBox').style.display='none';
+            }else{
+                alert('خطا: '+data.data);
+            }
+        })
+        .catch(error => {
+            console.error(error);
+            alert('خطا در ارسال درخواست');
+        });
+    }
+    </script>
+    <?php
+    return ob_get_clean();
+}
+
+add_shortcode('banknote_order_form', 'banknote_order_form_shortcode');
+
+/*---------------------------------------------------
+منوی پیشخوان
+---------------------------------------------------*/
+function bof_admin_menu() {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'banknote_orders';
+    
+    if($wpdb->get_var("SHOW TABLES LIKE '$table_name'") == $table_name) {
+        $count = $wpdb->get_var("SELECT COUNT(id) FROM $table_name WHERE is_read = 0");
+    } else {
+        $count = 0;
+    }
+
+    $menu_title = 'سفارشات اسکناس';
+
+    if($count > 0){
+        $menu_title .= ' <span class="awaiting-mod update-plugins count-' . $count . '"><span class="plugin-count">' . $count . '</span></span>';
+    }
+
+    add_menu_page(
+        'سفارشات اسکناس',
+        $menu_title,
+        'manage_options',
+        'banknote-orders',
+        'bof_orders_page',
+        'dashicons-money-alt',
+        7
+    );
+}
+
+add_action('admin_menu', 'bof_admin_menu');
+
+/*---------------------------------------------------
+صفحه سفارشات در پیشخوان
+---------------------------------------------------*/
+function bof_orders_page() {
+
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'banknote_orders';
+
+    if($wpdb->get_var("SHOW TABLES LIKE '$table_name'") != $table_name) {
+
+        echo '<div class="wrap">
+                <h1>خطا</h1>
+                <p>جدول دیتابیس ساخته نشده است.</p>
+              </div>';
+
+        return;
+    }
+
+    /*---------------------------------------------------
+    خوانده شده
+    ---------------------------------------------------*/
+    if (isset($_GET['mark_read']) && isset($_GET['order_id'])) {
+
+        $order_id = intval($_GET['order_id']);
+
+        $wpdb->update(
+            $table_name,
+            array('is_read' => 1),
+            array('id' => $order_id),
+            array('%d'),
+            array('%d')
+        );
+
+        echo '<div class="notice notice-success is-dismissible">
+                <p>سفارش خوانده شد.</p>
+              </div>';
+    }
+
+    /*---------------------------------------------------
+    همه خوانده شوند
+    ---------------------------------------------------*/
+    if (isset($_GET['mark_all_read'])) {
+
+        $wpdb->update(
+            $table_name,
+            array('is_read' => 1),
+            array('is_read' => 0),
+            array('%d'),
+            array('%d')
+        );
+
+        echo '<div class="notice notice-success is-dismissible">
+                <p>همه سفارشات خوانده شدند.</p>
+              </div>';
+    }
+
+    /*---------------------------------------------------
+    حذف سفارش
+    ---------------------------------------------------*/
+    if (isset($_GET['delete_order']) && isset($_GET['order_id'])) {
+
+        $order_id = intval($_GET['order_id']);
+
+        $wpdb->delete(
+            $table_name,
+            array('id' => $order_id),
+            array('%d')
+        );
+
+        echo '<div class="notice notice-success is-dismissible">
+                <p>سفارش حذف شد.</p>
+              </div>';
+    }
+
+    /*---------------------------------------------------
+    ذخیره ویرایش
+    ---------------------------------------------------*/
+    if (isset($_POST['update_order'])) {
+
+        $order_id = intval($_POST['order_id']);
+
+        $wpdb->update(
+            $table_name,
+            array(
+                'fullname'      => sanitize_text_field($_POST['fullname']),
+                'phone'         => sanitize_text_field($_POST['phone']),
+                'order_type'    => sanitize_text_field($_POST['order_type']),
+                'currency_type' => sanitize_text_field($_POST['currency_type']),
+            ),
+            array('id' => $order_id),
+            array('%s','%s','%s','%s'),
+            array('%d')
+        );
+
+        echo '<div class="notice notice-success is-dismissible">
+                <p>سفارش ویرایش شد.</p>
+              </div>';
+    }
+
+    $orders = $wpdb->get_results(
+        "SELECT * FROM $table_name ORDER BY created_at DESC"
+    );
+
+    ?>
+
+    <div class="wrap">
+
+        <h1 style="margin-bottom:20px;">
+
+            لیست درخواست‌های اسکناس
+
+            <a href="?page=banknote-orders&mark_all_read=1"
+               class="page-title-action">
+
+               تبدیل همه به خوانده شده
+
+            </a>
+
+        </h1>
+
+        <?php
+        /*---------------------------------------------------
+        فرم ویرایش
+        ---------------------------------------------------*/
+        if (isset($_GET['edit_order'])) {
+
+            $edit_id = intval($_GET['edit_order']);
+
+            $edit_order = $wpdb->get_row(
+                "SELECT * FROM $table_name WHERE id = $edit_id"
+            );
+
+            if ($edit_order):
+        ?>
+
+        <div style="background:#fff;padding:20px;margin-bottom:25px;border:1px solid #ddd;border-radius:10px;">
+
+            <h2>ویرایش سفارش</h2>
+
+            <form method="post">
+
+                <input type="hidden"
+                       name="order_id"
+                       value="<?php echo $edit_order->id; ?>">
+
+                <p>
+                    <label>نام</label><br>
+
+                    <input type="text"
+                           name="fullname"
+                           value="<?php echo esc_attr($edit_order->fullname); ?>"
+                           style="width:100%;max-width:500px;">
+                </p>
+
+                <p>
+                    <label>شماره تماس</label><br>
+
+                    <input type="text"
+                           name="phone"
+                           value="<?php echo esc_attr($edit_order->phone); ?>"
+                           style="width:100%;max-width:500px;">
+                </p>
+
+                <p>
+                    <label>نوع درخواست</label><br>
+
+                    <select name="order_type">
+
+                        <option value="خرید اسکناس"
+                        <?php selected($edit_order->order_type,'خرید اسکناس'); ?>>
+
+                        خرید اسکناس
+
+                        </option>
+
+                        <option value="فروش اسکناس"
+                        <?php selected($edit_order->order_type,'فروش اسکناس'); ?>>
+
+                        فروش اسکناس
+
+                        </option>
+
+                    </select>
+                </p>
+
+                <p>
+                    <label>نوع ارز</label><br>
+
+                    <input type="text"
+                           name="currency_type"
+                           value="<?php echo esc_attr($edit_order->currency_type); ?>"
+                           style="width:100%;max-width:500px;">
+                </p>
+
+                <p>
+                    <button type="submit"
+                            name="update_order"
+                            class="button button-primary">
+
+                        ذخیره تغییرات
+
+                    </button>
+                </p>
+
+            </form>
+
+        </div>
+
+        <?php
+            endif;
+        }
+        ?>
+
+        <?php if($orders): ?>
+
+        <table class="widefat fixed striped">
+
+            <thead>
+
+                <tr>
+
+                    <th width="60">شناسه</th>
+                    <th>نام</th>
+                    <th>شماره تماس</th>
+                    <th>نوع درخواست</th>
+                    <th>نوع ارز</th>
+                    <th>تاریخ ثبت</th>
+                    <th width="100">وضعیت</th>
+                    <th width="250">عملیات</th>
+
+                </tr>
+
+            </thead>
+
+            <tbody>
+
+            <?php foreach($orders as $order): ?>
+
+                <tr style="<?php echo (!$order->is_read) ? 'background:#f4fdf6;' : ''; ?>">
+
+                    <td><?php echo esc_html($order->id); ?></td>
+
+                    <td><?php echo esc_html($order->fullname); ?></td>
+
+                    <td><?php echo esc_html($order->phone); ?></td>
+
+                    <td>
+
+                        <?php if($order->order_type == 'خرید اسکناس'): ?>
+
+                            <span style="color:blue;font-weight:bold;">
+
+                                خرید اسکناس
+
+                            </span>
+
+                        <?php else: ?>
+
+                            <span style="color:red;font-weight:bold;">
+
+                                فروش اسکناس
+
+                            </span>
+
+                        <?php endif; ?>
+
+                    </td>
+
+                    <td><?php echo esc_html($order->currency_type); ?></td>
+
+                    <td><?php echo esc_html($order->created_at); ?></td>
+
+                    <td>
+
+                        <?php if($order->is_read): ?>
+
+                            <span style="color:green;font-weight:bold;">
+
+                                دیده شده
+
+                            </span>
+
+                        <?php else: ?>
+
+                            <span style="color:#b32d2e;font-weight:bold;">
+
+                                دیده نشده
+
+                            </span>
+
+                        <?php endif; ?>
+
+                    </td>
+
+                    <td>
+
+                        <?php if(!$order->is_read): ?>
+
+                        <a href="?page=banknote-orders&mark_read=1&order_id=<?php echo $order->id; ?>"
+                           class="button button-small">
+
+                           خوانده شد
+
+                        </a>
+
+                        <?php endif; ?>
+
+                        <a href="?page=banknote-orders&edit_order=<?php echo $order->id; ?>"
+                           class="button button-small">
+
+                           ویرایش
+
+                        </a>
+
+                        <a href="?page=banknote-orders&delete_order=1&order_id=<?php echo $order->id; ?>"
+                           class="button button-small"
+                           onclick="return confirm('از حذف این سفارش مطمئن هستید؟')"
+                           style="background:#b32d2e;color:#fff;border-color:#b32d2e;">
+
+                           حذف
+
+                        </a>
+
+                    </td>
+
+                </tr>
+
+            <?php endforeach; ?>
+
+            </tbody>
+
+        </table>
+
+        <?php else: ?>
+
+            <div class="notice notice-info">
+
+                <p>هنوز سفارشی ثبت نشده است.</p>
+
+            </div>
+
+        <?php endif; ?>
+
+    </div>
+
+    <?php
+}
